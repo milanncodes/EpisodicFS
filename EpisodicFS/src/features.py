@@ -1,5 +1,6 @@
 
 import os
+import hashlib
 from datetime import datetime
 from PIL import Image
 from sentence_transformers import SentenceTransformer
@@ -12,26 +13,46 @@ import soundfile as sf
 # 'sentence-transformers/clip-ViT-B-32' is a good multimodal choice if available directly.
 # If not, 'all-MiniLM-L6-v2' for text and a separate approach for images.
 
-is_clip_model = False # Flag to indicate if a CLIP-based model was loaded
-VECTOR_DIMENSION = 384 # Default dimension for all-MiniLM-L6-v2, updated if CLIP loads
+VECTOR_DIMENSION = 384
 
 try:
-    # Attempt to load a multimodal model
-    model = SentenceTransformer('sentence-transformers/clip-ViT-B-32')
-    is_clip_model = True
-    VECTOR_DIMENSION = 512 # CLIP-ViT-B-32 typically outputs 512-d embeddings
-    print(f"Loaded multimodal embedding model: clip-ViT-B-32 with dimension {VECTOR_DIMENSION}")
-except Exception as e:
-    print(f"Could not load clip-ViT-B-32 directly: {e}")
-    print("Falling back to text-only model and will use placeholder for image embedding.")
     model = SentenceTransformer('all-MiniLM-L6-v2')
-    VECTOR_DIMENSION = model.get_sentence_embedding_dimension() # Should be 384
-    print(f"Loaded text embedding model: all-MiniLM-L6-v2 with dimension {VECTOR_DIMENSION}")
+    if model.get_sentence_embedding_dimension() != VECTOR_DIMENSION:
+        raise RuntimeError("all-MiniLM-L6-v2 did not provide the required 384 dimensions")
+    print(f"Loaded embedding model: all-MiniLM-L6-v2 with dimension {VECTOR_DIMENSION}")
+except Exception as e:
+    raise RuntimeError(
+        "Unable to load the required 384-dimensional embedding model. "
+        "Install requirements and ensure the model is available locally."
+    ) from e
 
-    # Define get_image_embedding here, it will be used if not a CLIP model
-    def get_image_embedding(image_path):
-        print(f"Warning: Image embedding is a placeholder for {image_path}. No actual image embedding generated.")
-        return np.random.rand(VECTOR_DIMENSION) # Dummy vector of correct dimension
+
+def _deterministic_embedding(value):
+    """Create a repeatable fallback vector without pretending it is semantic."""
+    digest = hashlib.sha256(value.encode('utf-8')).digest()
+    values = np.frombuffer((digest * ((VECTOR_DIMENSION * 4 // len(digest)) + 1)), dtype=np.uint8)
+    return (values[:VECTOR_DIMENSION].astype(np.float32) / 255.0).tolist()
+
+
+def get_image_embedding(image_path):
+    """Return a deterministic image fallback while keeping the vector schema valid."""
+    try:
+        with Image.open(image_path) as image:
+            image.verify()
+        print(f"Warning: image semantics are unavailable; using deterministic fallback for {image_path}.")
+    except Exception as exc:
+        raise ValueError(f"Invalid image file {image_path}: {exc}") from exc
+    return np.asarray(_deterministic_embedding(image_path), dtype=np.float32)
+
+
+def get_audio_embedding(audio_path):
+    """Extract audio metadata and return a deterministic schema-compatible vector."""
+    try:
+        info = sf.info(audio_path)
+        descriptor = f"{audio_path}:{info.frames}:{info.samplerate}:{info.channels}"
+        return np.asarray(_deterministic_embedding(descriptor), dtype=np.float32), info.duration
+    except Exception as exc:
+        raise ValueError(f"Invalid or unsupported audio file {audio_path}: {exc}") from exc
 
 def extract_features(file_path):
     """
@@ -49,14 +70,10 @@ def extract_features(file_path):
     if file_path.endswith(('.jpg', '.jpeg', '.png')):
         file_type = 'image'
         try:
-            if is_clip_model: # Use the flag to check if a CLIP model was loaded
-                img = Image.open(file_path).convert('RGB')
-                embedding = model.encode(img, convert_to_numpy=True)
-            else:
-                embedding = get_image_embedding(file_path) # Use placeholder for image
+            embedding = get_image_embedding(file_path)
         except Exception as e:
             print(f"Error processing image {file_path}: {e}")
-            embedding = np.random.rand(VECTOR_DIMENSION) # Fallback to dummy embedding of correct dim
+            embedding = np.asarray(_deterministic_embedding(file_path), dtype=np.float32)
 
     elif file_path.endswith(('.txt', '.md')):
         file_type = 'text'
@@ -66,37 +83,36 @@ def extract_features(file_path):
             embedding = model.encode(text_content, convert_to_numpy=True)
         except Exception as e:
             print(f"Error processing text file {file_path}: {e}")
-            embedding = np.random.rand(VECTOR_DIMENSION) # Fallback to dummy embedding of correct dim
+            embedding = np.asarray(_deterministic_embedding(file_path), dtype=np.float32)
 
     elif file_path.endswith(('.pdf')):
         file_type = 'document'
         try:
             reader = pypdf.PdfReader(file_path)
-            text_content = "
-".join([page.extract_text() for page in reader.pages if page.extract_text()])
+            text_content = "\n".join(
+                page_text for page in reader.pages if (page_text := page.extract_text())
+            )
             embedding = model.encode(text_content, convert_to_numpy=True)
         except Exception as e:
             print(f"Error processing PDF {file_path}: {e}")
-            embedding = np.random.rand(VECTOR_DIMENSION) # Fallback to dummy embedding of correct dim
+            embedding = np.asarray(_deterministic_embedding(file_path), dtype=np.float32)
 
     elif file_path.endswith(('.wav', '.mp3')):
         file_type = 'audio'
-        # For audio, Whisper-Base would be used. Placeholder for now.
-        print(f"Warning: Audio processing for {file_path} is a placeholder. No actual audio embedding generated.")
-        text_content = f"Audio file: {filename}"
-        embedding = np.random.rand(VECTOR_DIMENSION) # Dummy embedding of correct dim
+        embedding, duration = get_audio_embedding(file_path)
+        text_content = f"Audio file: {filename}; duration: {duration:.2f}s"
 
     else:
         file_type = 'unknown'
         print(f"Warning: Unknown file type for {file_path}. No embedding generated.")
-        embedding = np.random.rand(VECTOR_DIMENSION) # Dummy embedding of correct dim
+        embedding = np.asarray(_deterministic_embedding(file_path), dtype=np.float32)
 
     if embedding is not None:
         # print(f"DEBUG: {file_path} generated embedding of dimension: {len(embedding)}") # Keep for debugging
         pass
 
     return {
-        'id': str(hash(file_path)), # Simple unique ID for now
+        'id': hashlib.sha256(file_path.encode('utf-8')).hexdigest()[:16],
         'file_path': file_path,
         'filename': filename,
         'file_type': file_type,

@@ -24,6 +24,7 @@ def setup_and_ingest_lancedb(base_dir='episodic_vault', time_window_seconds=3600
     files_to_process = []
     files_to_process.extend(glob.glob(os.path.join(image_dir, '*')))
     files_to_process.extend(glob.glob(os.path.join(docs_dir, '*')))
+    files_to_process.extend(glob.glob(os.path.join(base_dir, 'audio', '*')))
 
     print(f"Found {len(files_to_process)} files to process.")
 
@@ -58,8 +59,7 @@ def setup_and_ingest_lancedb(base_dir='episodic_vault', time_window_seconds=3600
                                   on_bad_vectors='fill', fill_value=fill_value_vector)
             print(f"LanceDB table '{table_name}' created/overwritten with {len(indexed_records)} records.")
 
-            print("
---- LanceDB Indexing Summary ---")
+            print("\n--- LanceDB Indexing Summary ---")
             print(f"Total indexed records: {len(tbl)}")
             print(f"Vector dimension: {VECTOR_DIMENSION}")
 
@@ -67,7 +67,17 @@ def setup_and_ingest_lancedb(base_dir='episodic_vault', time_window_seconds=3600
             print(f"Detected episode clusters: {unique_episodes}")
 
         except Exception as e:
-            print(f"Error during LanceDB table creation/ingestion: {e}")
+            raise RuntimeError(f"Error during LanceDB table creation/ingestion: {e}") from e
 
     print("LanceDB ingestion complete.")
     return db
+
+
+def open_vault_table(db, table_name="vault_index"):
+    """Open the indexed table with a helpful error for a fresh vault."""
+    try:
+        return db.open_table(table_name)
+    except Exception as exc:
+        raise RuntimeError(
+            f"LanceDB table '{table_name}' was not found. Run 'python main.py ingest' first."
+        ) from exc

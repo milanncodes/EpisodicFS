@@ -7,15 +7,15 @@
 ![Snapdragon X Compute](https://img.shields.io/badge/Snapdragon%20X%20Compute-Optimized-red)
 
 ## Executive Overview
-EpisodicFS redefines on-device data retrieval by moving beyond traditional keyword searches and the privacy concerns of intrusive screen-recording solutions like Windows Recall. It builds a local, privacy-preserving **Spatio-Temporal Knowledge Graph** that connects your digital artifacts (images, documents, audio) not just by content, but by their *episodic context*—when and where they were created, and what other files co-occurred around those moments. This allows for more intuitive, context-aware, and multi-modal searches, optimized for the Qualcomm Hexagon NPU on Snapdragon X series devices.
+EpisodicFS is a local proof of concept for privacy-preserving semantic retrieval. It connects images, documents, and audio files by their temporal proximity, assigning shared episode IDs and linked file records. Queries return direct vector matches plus related files from the same episode.
 
-Imagine asking, "Show me the bill from the restaurant where we discussed the server upgrade last month," and getting not just the invoice, but also the photo of the restaurant, the meeting notes, and a voice memo from that evening. EpisodicFS makes this possible by leveraging vector embeddings and temporal clustering.
+The current implementation uses the 384-dimensional `all-MiniLM-L6-v2` model for text and PDF embeddings. Images and audio use deterministic schema-compatible fallback vectors; audio also records WAV metadata and duration. This keeps the local POC reproducible while leaving room for a future native multimodal or Qualcomm-accelerated extractor.
 
 ## Architecture Diagram
 ```mermaid
 graph TD
-    A[Raw Files: Images, Docs, Audio] --> B{Feature Extraction: CLIP, MiniLM, Whisper}
-    B --> C[Vector Embeddings (Hexagon NPU)]
+    A[Raw Files: Images, Docs, Audio] --> B{Feature Extraction: MiniLM + Metadata}
+    B --> C[384-D Vector Records]
     C --> D{Temporal & Co-occurrence Clustering}
     D --> E[Episodic Knowledge Graph]
     E --> F[LanceDB Vector Store]
@@ -29,14 +29,13 @@ graph TD
     G --> H[Contextual Results]
 ```
 
-## Snapdragon Acceleration Table
+## Snapdragon Profiling
 | Model (Sample) | Task                  | Runtime | Latency (ms) | Peak Memory (MB) | Hardware Target  |
 |----------------|-----------------------|---------|--------------|------------------|------------------|
-| MobileNetV2    | Image Classification  | QNN     | 12.5 (Mock)  | 35.2 (Mock)      | Hexagon NPU      |
-| MiniLM-L6-v2   | Text Embedding        | ONNX    | N/A          | N/A              | Hexagon NPU      |
-| Whisper-Base   | Speech-to-Text        | QNN     | N/A          | N/A              | Hexagon NPU      |
+| MobileCLIP     | Multimodal embedding  | QNN     | 4.2 (Mock)   | N/A              | Hexagon NPU      |
+| Whisper-Base   | Speech-to-text        | QNN     | 12.8 (Mock)  | N/A              | Hexagon NPU      |
 
-*Note: Benchmarks above are illustrative mock values. Actual performance will be determined via Qualcomm AI Hub profiling.*
+Run the optional profiler with `python main.py --profile-snapdragon`. Without credentials it prints a clearly labeled simulated diagnostic. With a configured SDK and token it attempts to submit a real AI Hub profile for the Snapdragon X Elite CRD.
 
 ## Quickstart Instructions
 
@@ -45,24 +44,35 @@ graph TD
 pip install -r requirements.txt
 ```
 
-### 2. Configure Qualcomm AI Hub (Optional, for NPU acceleration)
-To use the actual Qualcomm AI Hub for model profiling and deployment, you need an API token. 
-Visit [Qualcomm AI Hub](https://aihub.qualcomm.com/) to get your token.
+### 2. Generate Test Fixtures
+Create a fresh sample vault containing three PNG images, two text/Markdown documents, and one WAV file:
 
-In your Colab environment (or local environment if using `qai-hub` CLI):
-- **Colab:** Click the '🔑' icon in the left sidebar, then 'Add a new secret'. Set the name to `QAI_TOKEN` and paste your API token as the value. Ensure 'Notebook access' is enabled.
-- **Local CLI:** `qai-hub configure --api_token <YOUR_TOKEN>`
+```bash
+python generate_fixtures.py
+```
 
-### 3. Ingest Your Data
+The generated directories are `episodic_vault/images`, `episodic_vault/docs`, and `episodic_vault/audio`.
+
+### 3. Configure Qualcomm AI Hub (Optional)
+To attempt real Qualcomm AI Hub profiling, set a token from [Qualcomm AI Hub](https://aihub.qualcomm.com/):
+
+```bash
+export QAI_HUB_API_TOKEN="<YOUR_TOKEN>"
+python main.py --profile-snapdragon
+```
+
+`QAI_TOKEN` is also accepted as a compatibility fallback. If the SDK or token is unavailable, the profiler remains local-only and prints simulated diagnostics.
+
+### 4. Ingest Your Data
 EpisodicFS will scan a base directory, extract features, and build its knowledge graph.
 
 ```bash
 python main.py ingest --base_dir ./my_vault --time_window_hours 2.0
 ```
 
-This will process files in `./my_vault` and group them into episodes if their creation/modification times are within a 2-hour window.
+This processes supported files in `./my_vault/images`, `./my_vault/docs`, and `./my_vault/audio`, then groups records by modification time when adjacent files are within the selected time window.
 
-### 4. Perform Semantic Queries
+### 5. Perform Semantic Queries
 
 Query for documents, images, or audio using natural language.
 
@@ -76,6 +86,8 @@ To search without expanding to episodic context:
 python main.py query "invoice for server upgrade" --no_episodic_context
 ```
 
+If the table does not exist, the query command explains that ingestion must be run first.
+
 ## Project Structure
 
 ```
@@ -87,6 +99,7 @@ episodicfs_repo/
 │   ├── db.py            # LanceDB connection and ingestion
 │   └── search.py        # Multi-hop query engine
 ├── main.py              # CLI entry point
+├── generate_fixtures.py # Local sample-vault generator
 ├── requirements.txt     # Python dependencies
 ├── LICENSE              # MIT License
 └── README.md            # Project overview and instructions

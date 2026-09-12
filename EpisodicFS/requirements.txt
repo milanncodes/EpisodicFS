@@ -1,8 +1,10 @@
 
-qai-hub
-qai-hub-models
-lancedb
-sentence-transformers
-pillow
-pypdf
-soundfiles
+pandas==2.2.3
+numpy==1.26.4
+lancedb==0.22.0
+sentence-transformers==3.4.1
+pillow==11.0.0
+pypdf==5.1.0
+soundfile==0.12.1
+qai-hub==0.25.0
+qai-hub-models==0.25.0

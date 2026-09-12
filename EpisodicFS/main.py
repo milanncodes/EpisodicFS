@@ -1,13 +1,7 @@
 
 import argparse
 import os
-from datetime import datetime
-import glob
 import lancedb
-
-# Import modular components
-from src.db import setup_and_ingest_lancedb
-from src.search import episodic_search, display_results
 
 def main():
     parser = argparse.ArgumentParser(description="EpisodicFS: Privacy-Preserving On-Device Multimodal Retrieval.")
@@ -24,19 +18,28 @@ def main():
     query_parser.add_argument('--base_dir', type=str, default='episodic_vault', help='Base directory for the vault.')
     query_parser.add_argument('--top_k', type=int, default=5, help='Number of top results to retrieve.')
     query_parser.add_argument('--no_episodic_context', action='store_true', help='Do not include episodic context in search results.')
+    parser.add_argument('--profile-snapdragon', action='store_true', help='Profile the optional Qualcomm AI Hub path.')
 
     args = parser.parse_args()
 
+    if args.profile_snapdragon:
+        from src.qualcomm_profiler import profile_snapdragon
+
+        profile_snapdragon()
+        return
+
     if args.command == 'ingest':
-        print(f"
---- Starting Ingestion into EpisodicFS Vault: {args.base_dir} ---")
+        from src.db import setup_and_ingest_lancedb
+
+        print(f"\n--- Starting Ingestion into EpisodicFS Vault: {args.base_dir} ---")
         time_window_seconds = int(args.time_window_hours * 3600)
         db_connection = setup_and_ingest_lancedb(base_dir=args.base_dir, time_window_seconds=time_window_seconds)
         print("Ingestion complete.")
 
     elif args.command == 'query':
-        print(f"
---- Performing Query: '{args.query_text}' on EpisodicFS Vault: {args.base_dir} ---")
+        from src.search import episodic_search, display_results
+
+        print(f"\n--- Performing Query: '{args.query_text}' on EpisodicFS Vault: {args.base_dir} ---")
         db_path = os.path.join(args.base_dir, 'db')
         try:
             db_connection = lancedb.connect(db_path)
@@ -44,9 +47,14 @@ def main():
             print(f"Error connecting to LanceDB at {db_path}. Ensure data has been ingested: {e}")
             return
 
-        direct_hits, episodic_context_hits, total_time_ms = episodic_search(
-            args.query_text, db_connection, top_k=args.top_k, include_episodic_context=not args.no_episodic_context
-        )
+        try:
+            direct_hits, episodic_context_hits, total_time_ms = episodic_search(
+                args.query_text, db_connection, top_k=args.top_k,
+                include_episodic_context=not args.no_episodic_context
+            )
+        except RuntimeError as exc:
+            print(exc)
+            return
         display_results(args.query_text, direct_hits, episodic_context_hits, total_time_ms)
         print("Query complete.")
 
