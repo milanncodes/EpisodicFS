@@ -1,0 +1,8 @@
+
+qai-hub
+qai-hub-models
+lancedb
+sentence-transformers
+pillow
+pypdf
+soundfiles
