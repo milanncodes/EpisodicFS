@@ -55,6 +55,7 @@ def setup_and_ingest_lancedb(base_dir='episodic_vault', time_window_seconds=3600
         table_name = "vault_index"
         try:
             fill_value_vector = [0.0] * VECTOR_DIMENSION
+            # Rebuilding the deterministic index makes repeated ingestion safe.
             tbl = db.create_table(table_name, data=df_records, mode="overwrite",
                                   on_bad_vectors='fill', fill_value=fill_value_vector)
             print(f"LanceDB table '{table_name}' created/overwritten with {len(indexed_records)} records.")

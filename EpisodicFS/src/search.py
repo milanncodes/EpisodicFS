@@ -65,7 +65,6 @@ def display_results(query_text, direct_hits, episodic_context_hits, total_time_m
         score_str = f"{(1 - res.get('_distance', 0)):.4f}" if res.get('_distance') is not None else "N/A"
         print(f"  Similarity (Cosine): {score_str}")
         # Summary / Preview of Content (first 100 chars or filename if image)
-', ' ') + '...' if res['text_content'] else res['filename']
         content_preview = res['text_content'][:100].replace("\n", " ") + '...' if res['text_content'] else res['filename']
         print(f"  Content Preview: {content_preview}")
         print(f"  Episode ID: {res['episode_id']}")

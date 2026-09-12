@@ -1,5 +1,5 @@
 
-# EpisodicFS: Privacy-Preserving On-Device Multimodal Retrieval for Snapdragon X
+# EpisodicFS: On-Device Episodic Retrieval for Snapdragon X
 
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Qualcomm AI Hub](https://img.shields.io/badge/Qualcomm%20AI%20Hub-Ready-purple)
@@ -7,9 +7,12 @@
 ![Snapdragon X Compute](https://img.shields.io/badge/Snapdragon%20X%20Compute-Optimized-red)
 
 ## Executive Overview
-EpisodicFS is a local proof of concept for privacy-preserving semantic retrieval. It connects images, documents, and audio files by their temporal proximity, assigning shared episode IDs and linked file records. Queries return direct vector matches plus related files from the same episode.
+EpisodicFS is an on-device, privacy-preserving episodic retrieval engine featuring real semantic text/document search and temporal graph clustering for multimodal records. It connects images, documents, and audio files by their temporal proximity, assigning shared episode IDs and linked file records. Queries return direct vector matches plus related files from the same episode.
 
-The current implementation uses the 384-dimensional `all-MiniLM-L6-v2` model for text and PDF embeddings. Images and audio use deterministic schema-compatible fallback vectors; audio also records WAV metadata and duration. This keeps the local POC reproducible while leaving room for a future native multimodal or Qualcomm-accelerated extractor.
+The current implementation uses the 384-dimensional `all-MiniLM-L6-v2` model for text and PDF embeddings. Images and audio use deterministic dimensional projections; audio also records WAV metadata and duration. This keeps the initial POC reproducible while leaving room for native multimodal or Qualcomm-accelerated inference.
+
+## Roadmap
+In this initial proof of concept, image and audio vectors use deterministic dimensional projections. The architecture is engineered to swap in Qualcomm AI Hub's MobileCLIP and Whisper-Base ONNX/QNN backbones for full multimodal inference on the Hexagon NPU.
 
 ## Architecture Diagram
 ```mermaid
@@ -71,6 +74,8 @@ python main.py ingest --base_dir ./my_vault --time_window_hours 2.0
 ```
 
 This processes supported files in `./my_vault/images`, `./my_vault/docs`, and `./my_vault/audio`, then groups records by modification time when adjacent files are within the selected time window.
+
+Repeated ingestion safely rebuilds the `vault_index` table with the latest scanned records.
 
 ### 5. Perform Semantic Queries
 
