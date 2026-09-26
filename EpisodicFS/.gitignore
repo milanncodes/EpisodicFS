@@ -1,0 +1,48 @@
+# Python caches and bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Local environments
+.venv/
+env/
+venv/
+ENV/
+
+# Local databases and generated vault indexes
+*.db
+*.sqlite
+*.sqlite3
+/db/
+episodic_vault/db/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local model and tool caches
+models/
+.huggingface/
+.cache/
+
+# Generated fixture/demo data
+episodic_vault/
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Packaging output
+build/
+dist/
+*.egg-info/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example

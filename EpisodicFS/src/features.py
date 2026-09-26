@@ -22,6 +22,10 @@ QNN_PROVIDER_OPTIONS = {
 }
 
 
+def _warn(message: str) -> None:
+    print(f"Warning: {message}")
+
+
 class SnapdragonEmbedder:
     """Run transformer embeddings through Qualcomm QNN HTP when available."""
 
@@ -47,6 +51,7 @@ class SnapdragonEmbedder:
         try:
             import onnxruntime as runtime
         except ImportError as exc:
+            _warn("ONNX Runtime is unavailable; Snapdragon embedding execution cannot start.")
             raise RuntimeError(
                 "ONNX Runtime is required for Snapdragon embeddings. "
                 "Install onnxruntime and the Qualcomm QNN execution provider."
@@ -58,18 +63,24 @@ class SnapdragonEmbedder:
         try:
             from transformers import AutoTokenizer
         except ImportError as exc:
+            _warn("Transformers is unavailable; local embedding tokenization cannot start.")
             raise RuntimeError(
                 "Transformers is required to tokenize Snapdragon embeddings."
             ) from exc
         try:
             return AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
         except Exception as exc:
+            _warn(f"Unable to load the local tokenizer at {tokenizer_path}: {exc}")
             raise RuntimeError(
                 f"Unable to load the local tokenizer at {tokenizer_path}: {exc}"
             ) from exc
 
     def _create_session(self) -> Any:
-        available = set(self._runtime.get_available_providers())
+        try:
+            available = set(self._runtime.get_available_providers())
+        except Exception as exc:
+            _warn(f"Could not inspect ONNX Runtime execution providers: {exc}")
+            available = set()
         if QNN_PROVIDER in available:
             try:
                 session = self._runtime.InferenceSession(
@@ -79,6 +90,10 @@ class SnapdragonEmbedder:
                 self.active_provider = QNN_PROVIDER
                 return session
             except Exception as exc:
+                _warn(
+                    "Qualcomm QNN/Hexagon HTP session creation failed; "
+                    f"falling back to CPUExecutionProvider ({exc})."
+                )
                 print(
                     "Warning: Qualcomm QNN/Hexagon HTP unavailable; "
                     f"falling back to CPUExecutionProvider ({exc})."
@@ -95,18 +110,23 @@ class SnapdragonEmbedder:
                 providers=[CPU_PROVIDER],
             )
         except Exception as exc:
+            _warn(f"CPUExecutionProvider session creation failed: {exc}")
             raise RuntimeError(
                 f"Unable to create an ONNX Runtime CPU session: {exc}"
             ) from exc
 
     def _tokenize(self, texts: List[str]) -> Mapping[str, np.ndarray]:
-        encoded = self._tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="np",
-        )
+        try:
+            encoded = self._tokenizer(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors="np",
+            )
+        except Exception as exc:
+            _warn(f"Embedding tokenization failed: {exc}")
+            raise
         return {name: np.asarray(value) for name, value in encoded.items()}
 
     def _session_inputs(self, tokenized: Mapping[str, np.ndarray]) -> Dict[str, np.ndarray]:
@@ -141,12 +161,16 @@ class SnapdragonEmbedder:
         if not texts:
             return np.empty((0, VECTOR_DIMENSION), dtype=np.float32)
 
-        tokenized = self._tokenize(texts)
-        inputs = self._session_inputs(tokenized)
-        started = time.perf_counter()
-        outputs = self._session.run(None, inputs)
-        latency_ms = (time.perf_counter() - started) * 1000.0
-        embeddings = self._mean_pool(outputs, inputs["attention_mask"])
+        try:
+            tokenized = self._tokenize(texts)
+            inputs = self._session_inputs(tokenized)
+            started = time.perf_counter()
+            outputs = self._session.run(None, inputs)
+            latency_ms = (time.perf_counter() - started) * 1000.0
+            embeddings = self._mean_pool(outputs, inputs["attention_mask"])
+        except Exception as exc:
+            _warn(f"On-device embedding inference failed: {exc}")
+            raise
         self.profiler.record_latency(latency_ms, work_units=len(texts))
         return embeddings
 
@@ -191,6 +215,7 @@ def get_image_embedding(image_path: str) -> np.ndarray:
             image.verify()
         print(f"Warning: image semantics are unavailable; using deterministic fallback for {image_path}.")
     except Exception as exc:
+        _warn(f"Image validation failed for {image_path}: {exc}")
         raise ValueError(f"Invalid image file {image_path}: {exc}") from exc
     return _deterministic_embedding(image_path)
 
@@ -201,6 +226,7 @@ def get_audio_embedding(audio_path: str):
         descriptor = f"{audio_path}:{info.frames}:{info.samplerate}:{info.channels}"
         return _deterministic_embedding(descriptor), info.duration
     except Exception as exc:
+        _warn(f"Audio metadata extraction failed for {audio_path}: {exc}")
         raise ValueError(f"Invalid or unsupported audio file {audio_path}: {exc}") from exc
 
 
