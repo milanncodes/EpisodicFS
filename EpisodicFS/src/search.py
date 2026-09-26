@@ -1,71 +1,230 @@
+"""Hybrid lexical, dense, and episodic search."""
 
+import math
+import re
 import time
-import lancedb
+from collections import Counter
+from typing import Any, Dict, Iterable, List, Optional
+
+import numpy as np
+
 from .db import open_vault_table
+from .features import model
+from .graph import EpisodicKnowledgeGraph
 
-# Import necessary components from other modules
-from .features import model, VECTOR_DIMENSION
 
-def episodic_search(query_text, db_connection, top_k=3, include_episodic_context=True):
-    """
-    Performs a multi-hop search for files based on query text.
-    """
-    start_time = time.perf_counter()
+_TOKEN_PATTERN = re.compile(r"[\w]+", re.UNICODE)
 
-    # Step A: Direct Vector Match
+
+def _tokens(value: Any) -> List[str]:
+    return _TOKEN_PATTERN.findall(str(value or "").lower())
+
+
+def _record_text(record: Dict[str, Any]) -> str:
+    return " ".join(
+        str(record.get(field) or "")
+        for field in ("file_path", "filename", "file_name", "text_content")
+    )
+
+
+def lexical_search(records: Iterable[Dict[str, Any]], query_text: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Rank indexed records with a small BM25 implementation."""
+    records = list(records)
+    query_terms = _tokens(query_text)
+    if not records or not query_terms:
+        return []
+
+    documents = [_tokens(_record_text(record)) for record in records]
+    document_frequency = Counter(
+        term for document in documents for term in set(document)
+    )
+    average_length = sum(len(document) for document in documents) / len(documents) or 1.0
+    result = []
+    for record, document in zip(records, documents):
+        term_counts = Counter(document)
+        score = 0.0
+        for term in query_terms:
+            frequency = term_counts[term]
+            if not frequency:
+                continue
+            document_count = document_frequency[term]
+            inverse_frequency = math.log(
+                1.0 + (len(records) - document_count + 0.5) / (document_count + 0.5)
+            )
+            length_factor = 1.2 * (1.0 - 0.75 + 0.75 * len(document) / average_length)
+            score += inverse_frequency * frequency * 2.2 / (frequency + length_factor)
+        if score > 0:
+            result.append(
+                {
+                    **record,
+                    "file_path": record.get("file_path"),
+                    "score": score,
+                    "match_source": "keyword",
+                }
+            )
+    return sorted(result, key=lambda item: item["score"], reverse=True)[:limit]
+
+
+def _dense_search(table: Any, records: List[Dict[str, Any]], query_text: str, limit: int) -> List[Dict[str, Any]]:
     query_embedding = model.encode(query_text, convert_to_numpy=True).tolist()
-    tbl = open_vault_table(db_connection)
+    dense_frame = table.search(query_embedding).metric("cosine").limit(limit).to_pandas()
+    dense_results = dense_frame.to_dict(orient="records")
+    record_by_path = {record.get("file_path"): record for record in records}
+    results = []
+    for result in dense_results:
+        record = {**record_by_path.get(result.get("file_path"), {}), **result}
+        distance = result.get("_distance")
+        record["score"] = 1.0 - float(distance) if distance is not None else 0.0
+        record["match_source"] = "vector"
+        results.append(record)
+    return results
 
-    direct_hits_df = tbl.search(query_embedding).metric("cosine").limit(top_k).to_pandas()
-    direct_hits = direct_hits_df.to_dict(orient='records')
-    for hit in direct_hits:
-        hit['match_type'] = 'Direct Vector Hit'
 
-    # Step B: Graph / Episodic Expansion
-    episodic_context_hits = []
-    if include_episodic_context and not direct_hits_df.empty:
-        # Get unique episode IDs from direct hits
-        unique_episode_ids = direct_hits_df['episode_id'].unique().tolist()
+def rrf_combine(
+    dense_results: List[Dict[str, Any]],
+    lexical_results: List[Dict[str, Any]],
+    k: int = 60,
+) -> List[Dict[str, Any]]:
+    """Merge ranked result lists using Reciprocal Rank Fusion."""
+    if k < 1:
+        raise ValueError("k must be at least 1")
+    combined: Dict[str, Dict[str, Any]] = {}
+    for results, source in ((dense_results, "vector"), (lexical_results, "keyword")):
+        for rank, result in enumerate(results, start=1):
+            file_path = result.get("file_path")
+            if not file_path:
+                continue
+            entry = combined.setdefault(file_path, {**result, "score": 0.0, "_sources": set()})
+            entry["score"] += 1.0 / (k + rank)
+            entry["_sources"].add(source)
+            for key, value in result.items():
+                if key not in {"score", "match_source"}:
+                    entry.setdefault(key, value)
+    output = []
+    for entry in sorted(combined.values(), key=lambda item: item["score"], reverse=True):
+        sources = entry.pop("_sources")
+        entry["match_source"] = "+".join(source for source in ("vector", "keyword") if source in sources)
+        output.append(entry)
+    return output
 
-        for episode_id in unique_episode_ids:
-            # Query for all items in this episode
-            episode_items_df = tbl.to_pandas()
-            episode_items_df = episode_items_df[episode_items_df['episode_id'] == episode_id]
 
-            # Filter out items already in direct hits
-            direct_hit_ids = {hit['id'] for hit in direct_hits}
-            for _, row in episode_items_df.iterrows():
-                if row['id'] not in direct_hit_ids:
-                    # Add only if not already a direct hit
-                    context_hit = row.to_dict()
-                    context_hit['match_type'] = '[Episodic Context Match]'
-                    episodic_context_hits.append(context_hit)
+def _profiler_metrics() -> Dict[str, Any]:
+    embedder = getattr(model, "_instance", None)
+    if embedder is None:
+        return {}
+    return embedder.profiler.format_telemetry_report(as_dict=True)
 
-    total_time_ms = (time.perf_counter() - start_time) * 1000
-    return direct_hits, episodic_context_hits, total_time_ms
 
-def display_results(query_text, direct_hits, episodic_context_hits, total_time_ms):
-    """
-    Prints a clean, readable result card for each query.
-    """
+def _apply_episodic_context(
+    results: List[Dict[str, Any]],
+    graph: Optional[EpisodicKnowledgeGraph],
+    seed_file: Optional[str],
+    max_hops: int = 2,
+    time_window_seconds: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    if graph is None or not seed_file:
+        return results
+    context = graph.find_episodic_context(
+        seed_file,
+        max_hops=max_hops,
+        time_window_seconds=time_window_seconds,
+    )
+    result_by_path = {result.get("file_path"): result for result in results}
+    maximum_score = results[0]["score"] if results else 0.0
+    for item in context:
+        file_path = item.get("file_path")
+        if not file_path:
+            continue
+        boost = maximum_score * 0.15 / max(1, item["hops"])
+        if file_path in result_by_path:
+            result = result_by_path[file_path]
+            result["score"] += boost
+            result["match_source"] = "+".join(
+                dict.fromkeys([result.get("match_source", ""), "episodic"])
+            ).strip("+")
+        else:
+            result = {
+                **item,
+                "score": boost,
+                "match_source": "episodic",
+                "episodic_hops": item["hops"],
+            }
+            results.append(result)
+    return sorted(results, key=lambda item: item["score"], reverse=True)
+
+
+def hybrid_search(
+    query_text: str,
+    db_connection: Any,
+    top_k: int = 5,
+    rrf_k: int = 60,
+    seed_file: Optional[str] = None,
+    time_window_seconds: Optional[int] = None,
+    episodic_graph: Optional[EpisodicKnowledgeGraph] = None,
+    include_episodic_context: bool = True,
+) -> Dict[str, Any]:
+    """Return fused vector/keyword results with optional episodic context."""
+    started = time.perf_counter()
+    if top_k < 1:
+        raise ValueError("top_k must be at least 1")
+    table = open_vault_table(db_connection)
+    records = table.to_pandas().to_dict(orient="records")
+    dense_started = time.perf_counter()
+    dense_results = _dense_search(table, records, query_text, top_k * 2)
+    dense_latency_ms = (time.perf_counter() - dense_started) * 1000.0
+    lexical_started = time.perf_counter()
+    lexical_results = lexical_search(records, query_text, limit=top_k * 2)
+    lexical_latency_ms = (time.perf_counter() - lexical_started) * 1000.0
+    results = rrf_combine(dense_results, lexical_results, k=rrf_k)[:top_k]
+
+    if include_episodic_context:
+        results = _apply_episodic_context(
+            results,
+            episodic_graph,
+            seed_file,
+            time_window_seconds=time_window_seconds,
+        )[:top_k]
+    search_latency_ms = (time.perf_counter() - started) * 1000.0
+    return {
+        "results": [
+            {
+                "file_path": result.get("file_path"),
+                "score": result.get("score", 0.0),
+                "match_source": result.get("match_source"),
+                **({"record": result} if "record" not in result else {}),
+            }
+            for result in results
+        ],
+        "latency": {
+            "search_latency_ms": search_latency_ms,
+            "dense_latency_ms": dense_latency_ms,
+            "lexical_latency_ms": lexical_latency_ms,
+            "embedding_profiler": _profiler_metrics(),
+        },
+    }
+
+
+def episodic_search(query_text: str, db_connection: Any, top_k: int = 3, include_episodic_context: bool = True):
+    """Compatibility wrapper returning the original three-value search tuple."""
+    response = hybrid_search(
+        query_text,
+        db_connection,
+        top_k=top_k,
+        include_episodic_context=include_episodic_context,
+    )
+    direct_hits = [item for item in response["results"] if "vector" in item["match_source"]]
+    context_hits = [item for item in response["results"] if item not in direct_hits]
+    return direct_hits, context_hits, response["latency"]["search_latency_ms"]
+
+
+def display_results(query_text: str, direct_hits: List[Dict[str, Any]], episodic_context_hits: List[Dict[str, Any]], total_time_ms: float):
+    """Print structured hybrid results in the existing CLI format."""
     print(f"\n--- Search Results for: '{query_text}' (Query Time: {total_time_ms:.2f} ms) ---")
-
     all_results = direct_hits + episodic_context_hits
     if not all_results:
         print("No matching files found.")
         return
-
-    # Sort results to have direct hits first, then episodic (could also sort by score for direct hits)
-    all_results.sort(key=lambda x: (0 if x['match_type'] == 'Direct Vector Hit' else 1, x.get('_distance', 0)))
-
-    for i, res in enumerate(all_results):
-        print(f"\nRank {i+1} ({res['match_type']}):")
-        print(f"  File Path: {res['file_path']}")
-        print(f"  File Type: {res['file_type']}")
-        score_str = f"{(1 - res.get('_distance', 0)):.4f}" if res.get('_distance') is not None else "N/A"
-        print(f"  Similarity (Cosine): {score_str}")
-        # Summary / Preview of Content (first 100 chars or filename if image)
-        content_preview = res['text_content'][:100].replace("\n", " ") + '...' if res['text_content'] else res['filename']
-        print(f"  Content Preview: {content_preview}")
-        print(f"  Episode ID: {res['episode_id']}")
-        print(f"  Linked Files (Hashes): {res['linked_files']}")
+    for index, result in enumerate(all_results, start=1):
+        print(f"\nRank {index} ({result.get('match_source', 'unknown')}):")
+        print(f"  File Path: {result.get('file_path')}")
+        print(f"  Score: {result.get('score', 0.0):.6f}")

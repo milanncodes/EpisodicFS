@@ -50,7 +50,7 @@ def main():
         try:
             direct_hits, episodic_context_hits, total_time_ms = episodic_search(
                 args.query_text, db_connection, top_k=args.top_k,
-                include_episodic_context=not args.no_episodic_context
+                include_episodic_conteas a receptionist. It receives your command and sends the work to the correct specialist module.xt=not args.no_episodic_context
             )
         except RuntimeError as exc:
             print(exc)

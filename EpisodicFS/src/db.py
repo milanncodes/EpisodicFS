@@ -1,12 +1,40 @@
 
+import json
 import os
 import lancedb
+import networkx as nx
 import pandas as pd
 import glob
 
 # Import functions and variables from other modules
 from .features import extract_features, VECTOR_DIMENSION
-from .graph import assign_episodes
+from .graph import EpisodicKnowledgeGraph, assign_episodes
+
+
+GRAPH_FILENAME = "episodic_graph.json"
+
+
+def store_episodic_graph(graph, base_dir="episodic_vault"):
+    """Store a graph as JSON next to the LanceDB database."""
+    graph_path = os.path.join(base_dir, "db", GRAPH_FILENAME)
+    os.makedirs(os.path.dirname(graph_path), exist_ok=True)
+    payload = nx.node_link_data(graph.graph)
+    with open(graph_path, "w", encoding="utf-8") as file:
+        json.dump(payload, file, separators=(",", ":"))
+    return graph_path
+
+
+def load_episodic_graph(base_dir="episodic_vault"):
+    """Load the persisted episodic graph for context traversal."""
+    graph_path = os.path.join(base_dir, "db", GRAPH_FILENAME)
+    try:
+        with open(graph_path, "r", encoding="utf-8") as file:
+            graph_data = json.load(file)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Episodic graph '{graph_path}' was not found. Run ingestion first."
+        ) from exc
+    return EpisodicKnowledgeGraph.from_networkx(nx.node_link_graph(graph_data))
 
 def setup_and_ingest_lancedb(base_dir='episodic_vault', time_window_seconds=3600):
     """
@@ -25,6 +53,10 @@ def setup_and_ingest_lancedb(base_dir='episodic_vault', time_window_seconds=3600
     files_to_process.extend(glob.glob(os.path.join(image_dir, '*')))
     files_to_process.extend(glob.glob(os.path.join(docs_dir, '*')))
     files_to_process.extend(glob.glob(os.path.join(base_dir, 'audio', '*')))
+    files_to_process.extend(
+        path for path in glob.glob(os.path.join(base_dir, 'code', '**', '*'), recursive=True)
+        if os.path.isfile(path)
+    )
 
     print(f"Found {len(files_to_process)} files to process.")
 
@@ -44,6 +76,11 @@ def setup_and_ingest_lancedb(base_dir='episodic_vault', time_window_seconds=3600
 
     # Assign episodes and linked files
     indexed_records = assign_episodes(all_file_records, time_window_seconds=time_window_seconds)
+    episodic_graph = EpisodicKnowledgeGraph.from_records(
+        indexed_records,
+        time_window_seconds=time_window_seconds,
+    )
+    store_episodic_graph(episodic_graph, base_dir=base_dir)
 
     # Convert to DataFrame for LanceDB ingestion
     df_records = pd.DataFrame(indexed_records)
